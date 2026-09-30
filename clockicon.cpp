@@ -1,6 +1,8 @@
 #include "clockicon.h"
 #include <math.h>
 
+extern BOOL g_bShowSeconds;
+
 //Color by hour
 static COLORREF HourColor(int hour)
 {
@@ -72,6 +74,23 @@ HICON CreateClockIcon(int size)
 	SelectObject(hdcColor, hpenMin);
 	MoveToEx(hdcColor, (int)cx, (int)cy, NULL);
 	LineTo(hdcColor, (int)(cx + rMin *  cos(minAngle * rad)), (int)(cy + rMin * sin(minAngle * rad)));
+
+	//Second
+	if (g_bShowSeconds)
+	{
+		double secAngle = st.wSecond * 6.0 - 90.0;
+		double rSec = size * 0.45;
+
+		HPEN hpenSec = CreatePen(PS_SOLID, 1, RGB(220, 30, 30));
+		HPEN oldPenSec = (HPEN)SelectObject(hdcColor, hpenSec);
+
+		MoveToEx(hdcColor, (int)cx, (int)cy, NULL);
+		LineTo(hdcColor, (int)(cx + rSec * cos(secAngle * rad)),
+			(int)(cy + rSec * sin(secAngle * rad)));
+
+		SelectObject(hdcColor, oldPenSec);
+		DeleteObject(hpenSec);
+	}
 
 	//Restore DC
 	SelectObject(hdcColor, oldBr);

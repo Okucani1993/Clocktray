@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include "clockicon.h"
 #include "resource.h"
+#include "settings.h"
+#include "alarm.h"
+#include "worldclock.h"
 
 #ifndef NIF_INFO
 #define NIF_INFO 0x00000010
@@ -42,23 +45,28 @@ typedef struct _NOTIFYICONDATA_V2 {
 	HICON hBalloonIcon;
 } NOTIFYICONDATA_V2;
 
-#define WM_TRAYICON		(WM_USER + 1)
-#define IDT_TIMER		1
-#define IDM_SHOWTIME	1001
-#define IDM_ABOUT		1002
-#define	IDM_EXIT		1003
-#define IDT_BALLOON		2
-#define IDM_INT_1MIN	2001
-#define IDM_INT_5MIN	2002
-#define IDM_INT_15MIN	2003
-#define	IDM_INT_1HOUR	2004
-#define IDM_INT_NEVER	2005
-#define	BALLOON_1MIN	60000
-#define BALLOON_5MIN	300000
-#define BALLOON_15MIN	900000
-#define BALLOON_1HOUR	3600000
-#define BALLOON_NEVER	0xFFFFFFFF
-#define IDM_AUTORUN		3001
+#define WM_TRAYICON				(WM_USER + 1)
+#define IDT_TIMER				1
+#define IDM_SHOWTIME			1001
+#define IDM_ABOUT				1002
+#define	IDM_EXIT				1003
+#define IDT_BALLOON				2
+#define IDM_INT_1MIN			2001
+#define IDM_INT_5MIN			2002
+#define IDM_INT_15MIN			2003
+#define	IDM_INT_1HOUR			2004
+#define IDM_INT_NEVER			2005
+#define	BALLOON_1MIN			60000
+#define BALLOON_5MIN			300000
+#define BALLOON_15MIN			900000
+#define BALLOON_1HOUR			3600000
+#define BALLOON_NEVER			0xFFFFFFFF
+#define IDM_AUTORUN				3001
+#define IDM_SHOWSECONDS			3002
+#define IDT_ALARM_BEEP			3
+#define IDM_ALARM_SET			4001
+#define IDM_ALARM_CLEAR			4002
+#define IDM_WORLDCLOCK_BASE		5000
 
 #define AUTORUN_KEY "Software\\Microsoft\\Windows\\CurrentVersion\\Run"
 #define AUTORUN_NAME "Clocktray"
@@ -69,6 +77,7 @@ UINT g_uBalloonInterval = BALLOON_1HOUR;
 NOTIFYICONDATA_V2 g_nid;
 HWND g_hwnd = NULL;
 BOOL g_bBalloonEnabled = TRUE;
+BOOL g_bShowSeconds = TRUE;
 
 BOOL IsAutorunEnabled()
 {
@@ -152,10 +161,9 @@ void MarkAsRun()
 void ShowAboutMessage(HWND hwnd)
 {
 	MessageBox(hwnd,
-		"Clocktray 1.0\n"
+		"Clocktray 1.1\n"
 		"\n"
 		"Clock in system tray\n"
-		"Icon changes depending time of day.\n"
 		"\n"
 		"Written by Immamalware",
 		"About",
@@ -253,6 +261,9 @@ void ApplyBalloonInterval(HWND hwnd, UINT newInterval)
 	{
 		g_bBalloonEnabled = FALSE;
 	}
+
+	Settings_Save();
+
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -262,11 +273,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	case WM_TRAYICON:
 		if (lParam == WM_LBUTTONUP)
 		{
-			ShowDateTimeMessage(hwnd);
-			BOOL g_bBalloonShowing = FALSE;
+			if (Alarm_IsRinging())
+			{
+				Alarm_StopBeeping(hwnd);
+			}
+			else
+			{
+				ShowDateTimeMessage(hwnd);
+			}
 		}
 		else if (lParam == WM_RBUTTONUP)
 		{
+			// Menu
 			POINT pt;
 			GetCursorPos(&pt);
 			HMENU hMenu = CreatePopupMenu();
@@ -288,6 +306,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 			// Main Menu
 			AppendMenu(hMenu, MF_STRING, IDM_SHOWTIME, "Show date and time");
+
+			UINT secondsFlag = MF_STRING;
+			if (g_bShowSeconds) secondsFlag |= MF_CHECKED;
+			AppendMenu(hMenu, secondsFlag, IDM_SHOWSECONDS, "Show seconds");
+
+			HMENU hWorldMenu = CreatePopupMenu();
+			WorldClock_AddToMenu(hWorldMenu, IDM_WORLDCLOCK_BASE);
+			AppendMenu(hMenu, MF_POPUP, (UINT)hWorldMenu, "World clock");
+
+			AppendMenu(hMenu, MF_STRING, IDM_ALARM_SET, "Set alarm..");
+
+			//only if alarm is set
+			UINT clearFlag = MF_STRING;
+			if (!Alarm_IsSet()) clearFlag |= MF_GRAYED;
+			AppendMenu(hMenu, clearFlag, IDM_ALARM_CLEAR, "Clear alarm");
 
 			UINT balloonFlag = MF_POPUP;
 			if (g_bBalloonEnabled) balloonFlag |= MF_CHECKED;
@@ -328,6 +361,30 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 				SetAutorun(FALSE);
 			else
 				SetAutorun(TRUE);
+
+		case IDM_SHOWSECONDS:
+			g_bShowSeconds = !g_bShowSeconds;
+			Settings_Save();
+			UpdateTrayTime(hwnd);
+			break;
+
+		case IDM_ALARM_SET:
+			Alarm_ShowDialog(hwnd);
+			break;
+
+		case IDM_ALARM_CLEAR:
+			Alarm_Clear();
+			Alarm_StopBeeping(hwnd);
+			break;
+
+		default:
+			if (LOWORD(wParam) >= IDM_WORLDCLOCK_BASE &&
+				LOWORD (wParam) < IDM_WORLDCLOCK_BASE + WorldClock_GetCount())
+			{
+				int cityIndex = LOWORD(wParam) - IDM_WORLDCLOCK_BASE;
+				WorldClock_Show(cityIndex);
+			}
+
 			break;
 
 		case IDM_INT_1MIN: ApplyBalloonInterval(hwnd, BALLOON_1MIN); break;
@@ -340,9 +397,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 	case WM_TIMER:
 		if (wParam == IDT_TIMER)
+		{
 			UpdateTrayTime(hwnd);
+			if (Alarm_Check())
+			{
+				Alarm_StartBeeping(hwnd);
+				ShowBalloonTip(hwnd); // optional - show balloon
+			}
+		}
+		else if (wParam == IDT_ALARM_BEEP)
+		{
+			Alarm_PlaySound(FALSE);
+		}
+
 		else if (wParam == IDT_BALLOON)
+		{
 			ShowBalloonTip(hwnd);
+		}
 		break;
 
 	case WM_DESTROY:
@@ -368,6 +439,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
 	RegisterClass(&wc);
 
 	g_hwnd = CreateWindow("TrayClockClass", "TrayClock", 0, 0, 0, 0, 0, NULL, NULL, hInst, NULL);
+
+	Settings_Load();
+	Alarm_Load();
 
 	ZeroMemory(&g_nid, sizeof(g_nid));
 	g_nid.cbSize			= 504;
