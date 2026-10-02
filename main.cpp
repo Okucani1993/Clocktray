@@ -5,6 +5,8 @@
 #include "settings.h"
 #include "alarm.h"
 #include "worldclock.h"
+#include "weather.h"
+#include "currency.h"
 
 #ifndef NIF_INFO
 #define NIF_INFO 0x00000010
@@ -67,6 +69,10 @@ typedef struct _NOTIFYICONDATA_V2 {
 #define IDM_ALARM_SET			4001
 #define IDM_ALARM_CLEAR			4002
 #define IDM_WORLDCLOCK_BASE		5000
+#define IDM_WEATHER_BASE		6000
+#define IDM_CURRENCY_CBR		7001
+#define IDM_CURRENCY_NBP		7002
+#define IDM_WEATHER_CUSTOM		6999
 
 #define AUTORUN_KEY "Software\\Microsoft\\Windows\\CurrentVersion\\Run"
 #define AUTORUN_NAME "Clocktray"
@@ -161,7 +167,7 @@ void MarkAsRun()
 void ShowAboutMessage(HWND hwnd)
 {
 	MessageBox(hwnd,
-		"Clocktray 1.1\n"
+		"Clocktray 1.2\n"
 		"\n"
 		"Clock in system tray\n"
 		"\n"
@@ -266,6 +272,74 @@ void ApplyBalloonInterval(HWND hwnd, UINT newInterval)
 
 }
 
+static const char* g_weatherCities[] =
+{
+	"Moscow",
+	"London",
+	"New York",
+	"Tokyo",
+	"Warsaw",
+};
+static const int g_weatherCityCount = sizeof(g_weatherCities) / sizeof(g_weatherCities[0]);
+
+static const char* GetGreeting(int hour)
+{
+	if (hour >= 5 && hour < 12) return "Good morning";
+	if (hour >= 12 && hour < 18) return "Good afternoon";
+	if (hour >= 18 && hour < 23) return "Good evening";
+	return "Good night";
+}
+
+static DWORD WINAPI WelcomeBalloonThread(LPVOID lpParam)
+{
+	HWND hwnd = (HWND)lpParam;
+
+	Sleep(2000);
+
+	SYSTEMTIME st;
+	GetLocalTime(&st);
+
+	const char* greeting = GetGreeting(st.wHour);
+
+	const char* city = Weather_GetCustomCity();
+	if (!city[0]) city = "New York";
+
+	char weather[128] = {0};
+	if (!Weather_FetchShort(city, weather, sizeof(weather)))
+		lstrcpy(weather, "weather n/a");
+
+	char usd[32] = {0}, eur[32] = {0};
+	Currency_Fetch("USD", usd, sizeof(usd));
+	Currency_Fetch("EUR", eur, sizeof(eur));
+
+	char title[64];
+	wsprintf(title, "Clocktray - %s", greeting);
+
+	char info[256];
+	wsprintf(info,
+		"%s %s\n"
+		"USD %s | EUR %s\n"
+		"%02d:%02d, %02d.%02d.%04d",
+		city, weather,
+		usd[0] ? usd : "n/a",
+		eur[0] ? eur : "n/a",
+		st.wHour, st.wMinute,
+		st.wDay, st.wMonth, st.wYear);
+
+	lstrcpy(g_nid.szInfoTitle, title);
+	lstrcpy(g_nid.szInfo, info);
+	g_nid.dwInfoFlags = NIIF_INFO;
+	g_nid.uTimeout = 15000;
+	g_nid.uFlags = BALLOON_FLAGS;
+	Shell_NotifyIcon(NIM_MODIFY, (NOTIFYICONDATA*)&g_nid);
+
+	g_nid.uFlags = BASE_FLAGS;
+	g_nid.szInfo[0] = '\0';
+	g_nid.dwInfoFlags = 0;
+
+	return 0;
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
 	switch (msg)
@@ -314,6 +388,31 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			HMENU hWorldMenu = CreatePopupMenu();
 			WorldClock_AddToMenu(hWorldMenu, IDM_WORLDCLOCK_BASE);
 			AppendMenu(hMenu, MF_POPUP, (UINT)hWorldMenu, "World clock");
+
+			HMENU hWeatherMenu = CreatePopupMenu();
+			for (int i = 0; i < g_weatherCityCount; i++)
+			{
+				AppendMenu(hWeatherMenu, MF_STRING, IDM_WEATHER_BASE + i, g_weatherCities[i]);
+			}
+
+			const char* customCity = Weather_GetCustomCity();
+			if (customCity[0])
+			{
+				AppendMenu(hWeatherMenu, MF_SEPARATOR, 0, NULL);
+				AppendMenu(hWeatherMenu, MF_STRING, IDM_WEATHER_CUSTOM + 1, customCity);
+			}
+
+			AppendMenu(hWeatherMenu, MF_SEPARATOR, 0, NULL);
+			AppendMenu(hWeatherMenu, MF_STRING, IDM_WEATHER_CUSTOM, "Set custom city...");
+
+			AppendMenu(hMenu, MF_POPUP, (UINT)hWeatherMenu, "Weather");
+
+			HMENU hCurrencyMenu = CreatePopupMenu();
+			AppendMenu(hCurrencyMenu, MF_STRING | (Currency_GetSource() == CURRENCY_SRC_CBR ? MF_CHECKED : 0),
+				IDM_CURRENCY_CBR, "Russian ruble (CBR)");
+			AppendMenu(hCurrencyMenu, MF_STRING | (Currency_GetSource() == CURRENCY_SRC_NBP ? MF_CHECKED : 0),
+				IDM_CURRENCY_NBP, "Polish zloty (NBP)");
+			AppendMenu(hMenu, MF_POPUP, (UINT)hCurrencyMenu, "Currency rates");
 
 			AppendMenu(hMenu, MF_STRING, IDM_ALARM_SET, "Set alarm..");
 
@@ -377,14 +476,40 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			Alarm_StopBeeping(hwnd);
 			break;
 
+		case IDM_CURRENCY_CBR:
+			Currency_SetSource(CURRENCY_SRC_CBR);
+			Currency_ShowMessage(hwnd);
+			break;
+
+		case IDM_CURRENCY_NBP:
+			Currency_SetSource(CURRENCY_SRC_NBP);
+			Currency_ShowMessage(hwnd);
+			break;
+
 		default:
+			// World clock
 			if (LOWORD(wParam) >= IDM_WORLDCLOCK_BASE &&
 				LOWORD (wParam) < IDM_WORLDCLOCK_BASE + WorldClock_GetCount())
 			{
 				int cityIndex = LOWORD(wParam) - IDM_WORLDCLOCK_BASE;
 				WorldClock_Show(cityIndex);
 			}
-
+			// Weather
+			else if (LOWORD(wParam) >= IDM_WEATHER_BASE && LOWORD(wParam) < IDM_WEATHER_BASE + g_weatherCityCount)
+			{
+				int cityIndex = LOWORD(wParam) - IDM_WEATHER_BASE;
+				Weather_ShowMessage(hwnd, g_weatherCities[cityIndex]);
+			}
+			else if (LOWORD(wParam) == IDM_WEATHER_CUSTOM + 1)
+			{
+				const char* city = Weather_GetCustomCity();
+				if (city[0])
+					Weather_ShowMessage(hwnd, city);
+			}
+			else if (LOWORD(wParam) == IDM_WEATHER_CUSTOM)
+			{
+				Weather_ShowCityDialog(hwnd);
+			}
 			break;
 
 		case IDM_INT_1MIN: ApplyBalloonInterval(hwnd, BALLOON_1MIN); break;
@@ -464,6 +589,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
 	SetTimer(g_hwnd, IDT_TIMER, 1000, NULL);
 	SetTimer(g_hwnd, IDT_BALLOON, g_uBalloonInterval, NULL);
 	UpdateTrayTime(g_hwnd);
+	CreateThread(NULL, 0, WelcomeBalloonThread, (LPVOID)g_hwnd, 0, NULL);
 
 	MSG msg;
 	while (GetMessage(&msg, NULL, 0, 0))
